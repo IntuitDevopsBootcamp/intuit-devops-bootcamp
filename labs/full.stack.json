@@ -1,0 +1,168 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Full Stack deployment",
+
+  "Parameters": {
+    "VpcId": {
+      "Type": "AWS::EC2::VPC::Id",
+      "Description": "Your existing VPC"
+    },
+    "SubnetIds": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Description": "Public Subnet Ids"
+    },
+    "InstanceType": {
+      "Description": "AppServer EC2 instance type",
+      "Type": "String",
+      "Default": "t2.micro",
+      "AllowedValues": [ "t1.micro", "t2.nano", "t2.micro", "t2.small", "t2.medium", "t2.large", "m1.small", "m3.medium", "m3.large" ],
+      "ConstraintDescription": "must be a valid EC2 instance type."
+    },
+    "AMIId": {
+      "Type": "String",
+      "Description": "AMI Id used for the ASG.",
+      "Default": "ami-c229c0a2"
+    },
+    "Environment": {
+      "Type": "String",
+      "Description": "The environment for this stack.",
+      "AllowedValues": [ "dev", "qa", "e2e", "test", "perf", "stage", "prod" ],
+      "ConstraintDescription": "production or development",
+      "Default": "dev"
+    },
+    "KeyName": {
+      "Description": "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
+    },
+    "SSHLocation": {
+      "Description": "The IP address range that can be used to SSH to the EC2 instances",
+      "Type": "String",
+      "MinLength": "9",
+      "MaxLength": "18",
+      "Default": "199.16.140.28/30",
+      "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+      "ConstraintDescription": "must be a valid IP CIDR range of the form x.x.x.x/x."
+    }
+  },
+  "Resources": {
+    "ELBSecGrp": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "ELB Access Group for HTTPS",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [
+           {
+              "IpProtocol": "tcp",
+              "FromPort": "80",
+              "ToPort": "80",
+              "CidrIp": { "Ref": "SSHLocation" }
+           }
+        ]
+      }
+    },
+    "AppSecGrp": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "App Access Group",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [
+           {
+              "IpProtocol": "tcp",
+              "FromPort": "22",
+              "ToPort": "22",
+              "CidrIp": { "Ref": "SSHLocation" }
+           }
+        ]
+      }
+    },
+    "AppIngressRule": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "IpProtocol": "tcp",
+        "FromPort": "8080",
+        "ToPort": "8080",
+        "SourceSecurityGroupId": { "Fn::GetAtt": [ "ELBSecGrp", "GroupId" ] },
+        "GroupId": { "Fn::GetAtt": [ "AppSecGrp", "GroupId" ] }
+      }
+    },
+    "ElasticLoadBalancer": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "SecurityGroups": [ { "Ref": "ELBSecGrp" } ] ,
+        "Subnets": { "Ref": "SubnetIds" },
+        "CrossZone": "true",
+        "Listeners": [
+          {
+            "LoadBalancerPort": "80",
+            "InstancePort": "8080",
+            "Protocol": "HTTP"
+          }
+        ],
+        "HealthCheck": {
+          "Target": "HTTP:8080/",
+          "HealthyThreshold": "3",
+          "UnhealthyThreshold": "5",
+          "Interval": "30",
+          "Timeout": "5"
+        }
+      }
+    },
+    "AppServerGroup": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "LaunchConfigurationName": { "Ref": "LaunchConfig" },
+        "MinSize": "2",
+        "MaxSize": "2",
+        "VPCZoneIdentifier": { "Ref": "SubnetIds" },
+        "LoadBalancerNames": [ { "Ref": "ElasticLoadBalancer" } ],
+        "Tags": [ { "Key": "Name", "Value": { "Ref": "AWS::StackName" }, "PropagateAtLaunch": "true" } ]
+      },
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "MinInstancesInService": "1",
+          "MaxBatchSize": "1",
+          "PauseTime": "PT15M",
+          "WaitOnResourceSignals": "true"
+        }
+      }
+    },
+    "LaunchConfig": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata": { "Comment": "Install a simple application" },
+      "Properties": {
+        "ImageId": { "Ref": "AMIId" },
+        "SecurityGroups": [ { "Ref": "AppSecGrp" } ],
+        "InstanceType": { "Ref": "InstanceType" },
+        "KeyName": { "Ref": "KeyName" },
+        "UserData": { "Fn::Base64": { "Fn::Join": [ "", [
+           "#!/bin/bash -xe\n",
+           "yum install -y tomcat8-webapps\n",
+           "/sbin/service tomcat8 start\n",
+           "mkdir -p /etc/intu_metadata.d\n",
+           "echo ENVIRONMENT=", { "Ref": "Environment" }, "> etc/intu_metadata.d/deployment\n"
+              ]
+            ]
+          }
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ElbSecurityGroups": { "Description": "ELB Security Group",
+      "Value": { "Ref": "ELBSecGrp" }
+    },
+    "AppSecGrp": {
+      "Description": "App Security Group",
+      "Value": { "Ref": "AppSecGrp" }
+    },
+    "URL": {
+      "Description": "URL of the  ELB",
+      "Value" :  { "Fn::Join" : [ "", [ "http://", { "Fn::GetAtt" : [ "ElasticLoadBalancer", "DNSName" ]}]]}
+    },
+    "LoadBalancerName": {
+      "Description": "Name of the ELB",
+      "Value": { "Ref": "ElasticLoadBalancer" }
+    }
+  }
+}
